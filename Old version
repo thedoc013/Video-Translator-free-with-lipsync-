@@ -1,0 +1,85 @@
+import os
+import subprocess
+import whisper
+from transformers import MarianMTModel, MarianTokenizer
+from TTS.api import TTS
+
+# -----------------------
+# 1️⃣ Pfade
+# -----------------------
+video_path = r"C:\Users\BlackyBodoBanu\dwhelper\Episode 1 Staffel 17.mp4"
+audio_path = r"C:\Users\BlackyBodoBanu\dwhelper\audio.wav"
+translated_text_path = r"C:\Users\BlackyBodoBanu\dwhelper\translated.txt"
+
+translated_audio_folder = r"C:\Users\BlackyBodoBanu\dwhelper\translatedsounds"
+os.makedirs(translated_audio_folder, exist_ok=True)
+tts_audio_path = os.path.join(translated_audio_folder, "output_audio.wav")
+
+final_video_folder = r"C:\Users\BlackyBodoBanu\dwhelper\fertigvideo"
+os.makedirs(final_video_folder, exist_ok=True)
+final_video_path = os.path.join(final_video_folder, "final_video.mp4")
+
+# -----------------------
+# 2️⃣ Audio extrahieren mit FFmpeg (Live-Progress)
+# -----------------------
+print("🔹 Extrahiere Audio mit FFmpeg...")
+process = subprocess.Popen(
+    ["ffmpeg", "-y", "-i", video_path, "-q:a", "0", "-map", "a", audio_path],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+    text=True
+)
+for line in process.stdout:
+    print(line, end="")
+process.wait()
+
+# -----------------------
+# 3️⃣ Whisper Transkription (CPU, FP32 automatisch)
+# -----------------------
+print("🔹 Transkribiere Audio mit Whisper...")
+whisper_model = whisper.load_model("base", device="cpu")  # CPU, FP32 automatisch
+result = whisper_model.transcribe(audio_path, verbose=True)
+original_text = result["text"]
+print("Originaltext:", original_text)
+
+# -----------------------
+# 4️⃣ Übersetzung Japanisch → Deutsch
+# -----------------------
+print("🔹 Übersetze Text...")
+src_text = [original_text]
+model_name = "Helsinki-NLP/opus-mt-ja-de"  # Japanisch → Deutsch
+tokenizer = MarianTokenizer.from_pretrained(model_name)
+model = MarianMTModel.from_pretrained(model_name)
+translated = model.generate(**tokenizer(src_text, return_tensors="pt", padding=True))
+translated_text = tokenizer.decode(translated[0], skip_special_tokens=True)
+print("Übersetzter Text:", translated_text)
+
+with open(translated_text_path, "w", encoding="utf-8") as f:
+    f.write(translated_text)
+
+# -----------------------
+# 5️⃣ Text-to-Speech (mit Progress)
+# -----------------------
+print("🔹 Generiere Audio mit TTS...")
+tts = TTS(model_name="tts_models/multilingual/multi-dataset/glow-tts", gpu=False, progress_bar=True)
+tts.tts_to_file(
+    text=translated_text,
+    speaker_wav=None,
+    file_path=tts_audio_path
+)
+
+# -----------------------
+# 6️⃣ Lippensynchronisation mit Wav2Lip
+# -----------------------
+print("🔹 Synchronisiere Lippen mit Wav2Lip...")
+wav2lip_checkpoint = r"C:\Users\BlackyBodoBanu\dwhelper\Wav2Lip\checkpoints\wav2lip.pth"
+subprocess.run([
+    "python", r"C:\Users\BlackyBodoBanu\dwhelper\Wav2Lip\inference.py",
+    "--checkpoint_path", wav2lip_checkpoint,
+    "--face", video_path,
+    "--audio", tts_audio_path,
+    "--outfile", final_video_path
+])
+
+print("✅ Fertiges Video erstellt:", final_video_path)
+print("🎵 TTS Audio liegt in:", tts_audio_path)
