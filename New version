@@ -1,0 +1,127 @@
+import os
+import subprocess
+import whisper
+from transformers import MarianMTModel, MarianTokenizer
+from TTS.api import TTS
+from pyannote.audio import Pipeline
+from pydub import AudioSegment
+
+# -----------------------
+# 1️⃣ Pfade
+# -----------------------
+video_path = r"C:\Users\BlackyBodoBanu\dwhelper\Episode 1 Staffel 17.mp4"
+audio_path = r"C:\Users\BlackyBodoBanu\dwhelper\audio.wav"
+translated_text_path = r"C:\Users\BlackyBodoBanu\dwhelper\translated.txt"
+
+translated_audio_folder = r"C:\Users\BlackyBodoBanu\dwhelper\translatedsounds"
+os.makedirs(translated_audio_folder, exist_ok=True)
+final_video_folder = r"C:\Users\BlackyBodoBanu\dwhelper\fertigvideo"
+os.makedirs(final_video_folder, exist_ok=True)
+final_video_path = os.path.join(final_video_folder, "final_video.mp4")
+
+# -----------------------
+# 2️⃣ Audio extrahieren
+# -----------------------
+print("🔹 Extrahiere Audio mit FFmpeg...")
+process = subprocess.Popen(
+    ["ffmpeg", "-y", "-i", video_path, "-q:a", "0", "-map", "a", audio_path],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+    text=True
+)
+for line in process.stdout:
+    print(line, end="")
+process.wait()
+
+# -----------------------
+# 3️⃣ Whisper Transkription
+# -----------------------
+print("🔹 Transkribiere Audio mit Whisper...")
+whisper_model = whisper.load_model("base", device="cpu")
+result = whisper_model.transcribe(audio_path, verbose=True, word_timestamps=True)
+segments = result.get("segments", [])
+for seg in segments:
+    seg["text"] = seg["text"].strip()
+print(f"Transkribierte Segmente: {len(segments)}")
+
+# -----------------------
+# 4️⃣ Sprechererkennung
+# -----------------------
+print("🔹 Erkenne Sprecher...")
+pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization")
+diarization = pipeline(audio_path)
+
+# -----------------------
+# 5️⃣ Text pro Sprecher segmentieren
+# -----------------------
+speaker_text_segments = {}
+for turn, _, speaker in diarization.itertracks(yield_label=True):
+    relevant_texts = [s["text"] for s in segments if s["start"] >= turn.start and s["end"] <= turn.end]
+    full_text = " ".join(relevant_texts).strip()
+    if full_text:
+        if speaker not in speaker_text_segments:
+            speaker_text_segments[speaker] = []
+        speaker_text_segments[speaker].append((turn.start, turn.end, full_text))
+
+# -----------------------
+# 6️⃣ Übersetzung + TTS mit Crossfade
+# -----------------------
+print("🔹 Generiere Audio pro Sprecher mit Voice-Cloning und Crossfade...")
+tts = TTS(model_name="tts_models/multilingual/vits", gpu=False, progress_bar=True)
+audio_original = AudioSegment.from_wav(audio_path)
+tts_audio_paths = []
+
+model_name = "Helsinki-NLP/opus-mt-ja-de"
+tokenizer = MarianTokenizer.from_pretrained(model_name)
+model = MarianMTModel.from_pretrained(model_name)
+
+combined_audio = AudioSegment.silent(duration=0)
+
+for speaker, segs in speaker_text_segments.items():
+    for i, (start, end, text) in enumerate(segs):
+        # Übersetzen
+        translated = model.generate(**tokenizer([text], return_tensors="pt", padding=True))
+        translated_text = tokenizer.decode(translated[0], skip_special_tokens=True)
+
+        # Originalsprecher-Sample
+        start_ms = int(start * 1000)
+        end_ms = int(end * 1000)
+        speaker_wav_path = os.path.join(translated_audio_folder, f"{speaker}_sample_{i}.wav")
+        audio_original[start_ms:end_ms].export(speaker_wav_path, format="wav")
+
+        # TTS erzeugen
+        tts_output_path = os.path.join(translated_audio_folder, f"{speaker}_tts_{i}.wav")
+        tts.tts_to_file(
+            text=translated_text,
+            speaker_wav=speaker_wav_path,
+            file_path=tts_output_path
+        )
+
+        # TTS Segment laden und mit leichtem Crossfade einfügen
+        tts_segment = AudioSegment.from_wav(tts_output_path)
+        if len(combined_audio) > 0:
+            combined_audio = combined_audio.append(tts_segment, crossfade=100)  # 100 ms Crossfade
+        else:
+            combined_audio = tts_segment
+
+# -----------------------
+# 7️⃣ Fertige WAV speichern
+# -----------------------
+tts_audio_path = os.path.join(translated_audio_folder, "output_audio.wav")
+combined_audio.export(tts_audio_path, format="wav")
+
+# -----------------------
+# 8️⃣ Lippensynchronisation
+# -----------------------
+print("🔹 Synchronisiere Lippen mit Wav2Lip...")
+wav2lip_checkpoint = r"C:\Users\BlackyBodoBanu\dwhelper\Wav2Lip\checkpoints\wav2lip.pth"
+subprocess.run([
+    "python", r"C:\Users\BlackyBodoBanu\dwhelper\Wav2Lip\inference.py",
+    "--checkpoint_path", wav2lip_checkpoint,
+    "--face", video_path,
+    "--audio", tts_audio_path,
+    "--outfile", final_video_path
+])
+
+print("✅ Fertiges Video erstellt:", final_video_path)
+print("🎵 TTS Audio liegt in:", tts_audio_path)
